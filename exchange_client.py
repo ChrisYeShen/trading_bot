@@ -13,6 +13,7 @@ import logging
 from typing import Dict, List, Optional
 
 import eth_account
+import requests
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
@@ -31,9 +32,11 @@ class HyperliquidClient:
             constants.TESTNET_API_URL if use_testnet else constants.MAINNET_API_URL
         )
 
-        # skip_ws=True：不启动 WebSocket（轮询模式即可，降低复杂度）
-        self.info = Info(base_url, skip_ws=True)
-        self.exchange = Exchange(self.account, base_url)
+        # 预先获取并过滤 spot_meta，修复测试网 token 索引越界问题
+        # Exchange 内部也会创建 Info，需同样传入过滤后的 spot_meta
+        safe_spot_meta = self._safe_spot_meta(base_url)
+        self.info = Info(base_url, skip_ws=True, spot_meta=safe_spot_meta)
+        self.exchange = Exchange(self.account, base_url, spot_meta=safe_spot_meta)
 
         # 缓存各标的的合约数量精度（小数位数）
         self._sz_decimals: Dict[str, int] = {}
@@ -45,6 +48,35 @@ class HyperliquidClient:
     # ──────────────────────────────────────────
     # 初始化 & 元数据
     # ──────────────────────────────────────────
+
+    @staticmethod
+    def _safe_spot_meta(base_url: str) -> dict:
+        """
+        获取 spot_meta 并过滤掉 token 索引越界的现货交易对。
+        修复 SDK 在测试网上的 IndexError（tokens 列表比 universe 引用的索引短）。
+        """
+        try:
+            resp = requests.post(
+                f"{base_url}/info",
+                json={"type": "spotMeta"},
+                timeout=10,
+            )
+            spot_meta = resp.json()
+            n_tokens = len(spot_meta.get("tokens", []))
+            original = spot_meta.get("universe", [])
+            spot_meta["universe"] = [
+                u for u in original
+                if len(u.get("tokens", [])) >= 2
+                and u["tokens"][0] < n_tokens
+                and u["tokens"][1] < n_tokens
+            ]
+            filtered = len(original) - len(spot_meta["universe"])
+            if filtered:
+                logger.debug(f"过滤了 {filtered} 个无效现货交易对（token 索引越界）")
+            return spot_meta
+        except Exception as exc:
+            logger.warning(f"获取 spot_meta 失败，使用空值: {exc}")
+            return {"universe": [], "tokens": []}
 
     def _load_asset_meta(self) -> None:
         """加载并缓存合约精度信息。"""
