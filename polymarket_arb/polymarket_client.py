@@ -101,13 +101,16 @@ class PolymarketClient:
         self,
         keywords: list[str] | None = None,
         limit: int = 200,
+        max_pages: int = 50,
     ) -> list[MarketInfo]:
         """
         获取活跃市场列表，可按关键词过滤（大小写不敏感）。
+        max_pages: 最多翻页数（每页 ~1000 条），防止无限翻页。
         """
         self._ensure_connected()
         markets: list[MarketInfo] = []
         next_cursor = ""
+        pages_fetched = 0
 
         while True:
             try:
@@ -117,6 +120,8 @@ class PolymarketClient:
             except PolyApiException as e:
                 logger.error(f"get_markets 失败: {e}")
                 break
+
+            pages_fetched += 1
 
             for m in resp.get("data", []):
                 if not m.get("active") or m.get("closed"):
@@ -156,6 +161,9 @@ class PolymarketClient:
 
             next_cursor = resp.get("next_cursor", "")
             if not next_cursor or next_cursor == "LTE=" or len(markets) >= limit:
+                break
+            if pages_fetched >= max_pages:
+                logger.info(f"已扫描 {pages_fetched} 页（约 {pages_fetched * 1000} 条），达到上限，停止翻页")
                 break
 
         logger.info(f"扫描到 {len(markets)} 个符合条件的活跃市场")
