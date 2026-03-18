@@ -16,7 +16,7 @@ from datetime import date
 from typing import Optional
 
 import noaa_client
-from market_scanner import SportsMarket, WeatherMarket
+from market_scanner import FuturesMarket, SportsMarket, WeatherMarket
 from odds_client import GameOdds, OddsClient
 from polymarket_client import MarketInfo
 
@@ -90,6 +90,9 @@ def generate_weather_signals(
 
     for wm in weather_markets:
         market = wm.market
+        if not _is_liquid(market):
+            logger.debug(f"跳过无流动性市场: {market.question[:50]}")
+            continue
         market_prob = market.implied_yes_prob
         if market_prob is None:
             logger.debug(f"跳过（无市场价格）: {market.question[:50]}")
@@ -171,6 +174,9 @@ def generate_sports_signals(
 
     for sm in sports_markets:
         market = sm.market
+        if not _is_liquid(market):
+            logger.debug(f"跳过无流动性市场: {market.question[:50]}")
+            continue
         market_prob = market.implied_yes_prob
         if market_prob is None:
             continue
@@ -212,6 +218,106 @@ def generate_sports_signals(
         signals.append(sig)
         if action != "PASS":
             logger.info(f"[体育/{sm.sport}] {action}  {detail}")
+
+    return signals
+
+
+# ── 冠军 Futures 信号生成 ─────────────────────────────────────
+
+def _fuzzy_team_lookup(team: str, futures_probs: dict[str, float]) -> Optional[float]:
+    """在 OddsAPI 返回的球队名中模糊匹配，返回概率"""
+    team_lower = team.lower()
+    # 精确匹配
+    if team in futures_probs:
+        return futures_probs[team]
+    # 部分匹配
+    for official, prob in futures_probs.items():
+        official_lower = official.lower()
+        words = team_lower.split()
+        if any(w in official_lower for w in words if len(w) > 3):
+            return prob
+        words2 = official_lower.split()
+        if any(w in team_lower for w in words2 if len(w) > 3):
+            return prob
+    return None
+
+
+_MAX_SPREAD = 0.15   # 超过 15% bid-ask spread 视为无流动性，跳过
+
+
+def _is_liquid(market: MarketInfo) -> bool:
+    """双边都有挂单且 spread 合理才认为有流动性"""
+    bid = market.yes_best_bid
+    ask = market.yes_best_ask
+    if bid is None or ask is None:
+        return False
+    if ask <= bid:
+        return False
+    return (ask - bid) <= _MAX_SPREAD
+
+
+def generate_futures_signals(
+    futures_markets:  list[FuturesMarket],
+    all_futures_odds: dict[str, dict[str, float]],   # {sport: {team: prob}}
+    min_edge:         float,
+    max_order_size:   float,
+) -> list[Signal]:
+    """
+    冠军押注套利信号（只做 winner 类型，qualify 因缺少专项赔率数据暂跳过）。
+    all_futures_odds 来自 OddsClient.get_all_futures()。
+    """
+    signals: list[Signal] = []
+
+    for fm in futures_markets:
+        # qualify 市场暂不处理（缺少专项赔率）
+        if fm.market_type != "winner":
+            continue
+
+        market = fm.market
+
+        # 流动性过滤：bid/ask 必须都存在且 spread ≤ 15%
+        if not _is_liquid(market):
+            logger.debug(f"跳过无流动性市场: {market.question[:60]}")
+            continue
+
+        market_prob = market.implied_yes_prob
+        if market_prob is None:
+            continue
+
+        sport_odds = all_futures_odds.get(fm.sport, {})
+        if not sport_odds:
+            logger.debug(f"无冠军赔率数据 [{fm.sport}]: {market.question[:50]}")
+            continue
+
+        ref_prob = _fuzzy_team_lookup(fm.team, sport_odds)
+        if ref_prob is None:
+            logger.debug(f"未匹配到球队 [{fm.team}]: {market.question[:50]}")
+            continue
+
+        edge = ref_prob - market_prob
+        action, token_id, limit_price = _decide_action(edge, market, min_edge)
+
+        detail = (
+            f"odds_prob={ref_prob:.1%}  market={market_prob:.1%}  "
+            f"edge={edge:+.1%}  team={fm.team}  event={fm.event}"
+        )
+
+        sig = Signal(
+            market         = market,
+            category       = "sports",
+            sub_type       = f"{fm.sport}_futures",
+            reference_prob = ref_prob,
+            market_prob    = market_prob,
+            edge           = edge,
+            action         = action,
+            token_id       = token_id,
+            limit_price    = limit_price,
+            order_size     = _calc_order_size(edge, max_order_size),
+            detail         = detail,
+        )
+        signals.append(sig)
+        if action != "PASS":
+            logger.info(f"[Futures/{fm.sport}] {action}  {detail}")
 
     return signals
 

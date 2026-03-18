@@ -81,7 +81,7 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "charlotte":   (35.2271, -80.8431),
 }
 
-# ── The Odds API スポーツキー ───────────────────────────────
+# ── The Odds API スポーツキー（单场赔率）────────────────────
 # https://the-odds-api.com/sports-odds-data/sports-apis.html
 ODDS_API_SPORT_KEYS: dict[str, str] = {
     "nfl":          "americanfootball_nfl",
@@ -95,6 +95,95 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "serie_a":      "soccer_italy_serie_a",
     "ligue_1":      "soccer_france_ligue_one",
     "mls":          "soccer_usa_mls",
+}
+
+# ── The Odds API 冠军/晋级 Futures 赔率 ──────────────────────
+FUTURES_SPORT_KEYS: dict[str, str] = {
+    "nba":       "basketball_nba_championship_winner",
+    "nfl":       "americanfootball_nfl_super_bowl_winner",
+    "ucl":       "soccer_uefa_champs_league_winner",
+    "world_cup": "soccer_fifa_world_cup_winner",
+    "epl":       "soccer_epl_winner",
+    "la_liga":   "soccer_spain_la_liga_winner",
+    "bundesliga":"soccer_germany_bundesliga_winner",
+}
+
+# ── NBA / NFL / Soccer 球队别名 → 官方全名（用于模糊匹配）────
+TEAM_ALIASES: dict[str, str] = {
+    # NBA
+    "lakers":         "Los Angeles Lakers",
+    "celtics":        "Boston Celtics",
+    "warriors":       "Golden State Warriors",
+    "bucks":          "Milwaukee Bucks",
+    "nets":           "Brooklyn Nets",
+    "heat":           "Miami Heat",
+    "nuggets":        "Denver Nuggets",
+    "suns":           "Phoenix Suns",
+    "clippers":       "Los Angeles Clippers",
+    "knicks":         "New York Knicks",
+    "bulls":          "Chicago Bulls",
+    "mavericks":      "Dallas Mavericks",
+    "76ers":          "Philadelphia 76ers",
+    "raptors":        "Toronto Raptors",
+    "jazz":           "Utah Jazz",
+    "hornets":        "Charlotte Hornets",
+    "hawks":          "Atlanta Hawks",
+    "thunder":        "Oklahoma City Thunder",
+    "rockets":        "Houston Rockets",
+    "cavaliers":      "Cleveland Cavaliers",
+    "magic":          "Orlando Magic",
+    "grizzlies":      "Memphis Grizzlies",
+    "spurs":          "San Antonio Spurs",
+    "trail blazers":  "Portland Trail Blazers",
+    "blazers":        "Portland Trail Blazers",
+    "pistons":        "Detroit Pistons",
+    "pelicans":       "New Orleans Pelicans",
+    "timberwolves":   "Minnesota Timberwolves",
+    "wolves":         "Minnesota Timberwolves",
+    "pacers":         "Indiana Pacers",
+    "kings":          "Sacramento Kings",
+    "wizards":        "Washington Wizards",
+    # NFL
+    "chiefs":         "Kansas City Chiefs",
+    "patriots":       "New England Patriots",
+    "eagles":         "Philadelphia Eagles",
+    "49ers":          "San Francisco 49ers",
+    "cowboys":        "Dallas Cowboys",
+    "packers":        "Green Bay Packers",
+    "ravens":         "Baltimore Ravens",
+    "bills":          "Buffalo Bills",
+    "bengals":        "Cincinnati Bengals",
+    "rams":           "Los Angeles Rams",
+    # Soccer — countries
+    "italy":          "Italy",
+    "france":         "France",
+    "england":        "England",
+    "germany":        "Germany",
+    "spain":          "Spain",
+    "brazil":         "Brazil",
+    "argentina":      "Argentina",
+    "portugal":       "Portugal",
+    "netherlands":    "Netherlands",
+    "ukraine":        "Ukraine",
+    "poland":         "Poland",
+    "sweden":         "Sweden",
+    # Soccer — clubs
+    "arsenal":        "Arsenal",
+    "chelsea":        "Chelsea",
+    "liverpool":      "Liverpool",
+    "manchester city":"Manchester City",
+    "man city":       "Manchester City",
+    "manchester united":"Manchester United",
+    "man united":     "Manchester United",
+    "real madrid":    "Real Madrid",
+    "barcelona":      "FC Barcelona",
+    "psg":            "Paris Saint-Germain",
+    "juventus":       "Juventus",
+    "bayern":         "Bayern Munich",
+    "inter milan":    "Inter Milan",
+    "ac milan":       "AC Milan",
+    "atletico madrid":"Atletico Madrid",
+    "dortmund":       "Borussia Dortmund",
 }
 
 # Polymarket 市场关键词 → 运动类别（用于 market_scanner 分类）

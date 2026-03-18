@@ -164,19 +164,16 @@ class PolymarketClient:
     # ── 订单簿 ────────────────────────────────────────────────
 
     def enrich_with_orderbook(self, market: MarketInfo) -> MarketInfo:
-        """
-        填充 market 的最优买/卖价（就地修改并返回）。
-        """
+        """填充 market 的最优买/卖价（就地修改并返回）。"""
         self._ensure_connected()
         try:
             book = self._client.get_order_book(market.yes_token_id)
             bids = book.bids or []
             asks = book.asks or []
 
-            market.yes_best_bid = float(bids[0].price)  if bids else None
-            market.yes_best_ask = float(asks[0].price)  if asks else None
+            market.yes_best_bid = float(bids[0].price) if bids else None
+            market.yes_best_ask = float(asks[0].price) if asks else None
 
-            # NO token 价格 ≈ 1 - YES price（Polymarket 保证 YES+NO=1）
             if market.yes_best_bid:
                 market.no_best_ask = round(1.0 - market.yes_best_bid, 4)
             if market.yes_best_ask:
@@ -185,6 +182,27 @@ class PolymarketClient:
         except Exception as e:
             logger.debug(f"订单簿获取失败 [{market.condition_id[:8]}]: {e}")
         return market
+
+    def enrich_batch(self, markets: list[MarketInfo], workers: int = 10) -> list[MarketInfo]:
+        """
+        并发拉取订单簿，默认 10 线程，速度约 10x。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _fetch(m):
+            self.enrich_with_orderbook(m)
+            time.sleep(0.02)   # 每线程限速 50 req/s
+            return m
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_fetch, m): m for m in markets}
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.debug(f"batch orderbook error: {e}")
+
+        return markets
 
     # ── 下单 ─────────────────────────────────────────────────
 

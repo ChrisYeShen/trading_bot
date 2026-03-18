@@ -215,5 +215,80 @@ class OddsClient:
         for key in sport_keys:
             games = self.get_odds(key)
             all_games.extend(games)
-            time.sleep(0.3)  # 避免触发速率限制
+            time.sleep(0.3)
         return all_games
+
+    def get_futures(self, sport_key: str) -> dict[str, float]:
+        """
+        获取指定运动的冠军/晋级 futures 赔率，返回去 vig 后的共识概率。
+        sport_key 示例："basketball_nba_championship_winner"
+        返回: {team_name: probability, ...}
+        """
+        if not self.api_key:
+            return {}
+
+        url = f"{_BASE}/sports/{sport_key}/odds"
+        params = {
+            "apiKey":     self.api_key,
+            "regions":    "us",
+            "markets":    "outrights",   # futures market type
+            "oddsFormat": _ODDS_FMT,
+        }
+
+        try:
+            data, headers = _get(url, params)
+        except Exception as e:
+            logger.error(f"OddsAPI futures fetch failed [{sport_key}]: {e}")
+            return {}
+
+        remaining = headers.get("x-requests-remaining")
+        if remaining is not None:
+            self._remaining_requests = int(remaining)
+
+        # 汇总各博彩公司对每支队的隐含概率
+        team_raw_probs: dict[str, list[float]] = {}
+
+        for event in data:
+            for bm in event.get("bookmakers", []):
+                for market in bm.get("markets", []):
+                    if market.get("key") != "outrights":
+                        continue
+                    outcomes = market.get("outcomes", [])
+                    # 先计算本书总过盘量，用于去 vig
+                    raw = [1.0 / o["price"] for o in outcomes if o.get("price", 0) > 1.0]
+                    if not raw:
+                        continue
+                    total = sum(raw)
+                    for o in outcomes:
+                        if o.get("price", 0) <= 1.0:
+                            continue
+                        team = o["name"]
+                        implied = (1.0 / o["price"]) / total   # 去 vig
+                        team_raw_probs.setdefault(team, []).append(implied)
+
+        # 取中位数作为共识概率
+        import statistics
+        result: dict[str, float] = {}
+        for team, probs in team_raw_probs.items():
+            result[team] = statistics.median(probs)
+
+        # 归一化（去 vig 后应接近 1，做最后修正）
+        total = sum(result.values())
+        if total > 0:
+            result = {t: p / total for t, p in result.items()}
+
+        logger.info(f"OddsAPI futures [{sport_key}]: {len(result)} teams "
+                    f"(remaining: {self._remaining_requests})")
+        return result
+
+    def get_all_futures(self, futures_keys: dict[str, str]) -> dict[str, dict[str, float]]:
+        """
+        批量获取冠军赔率。
+        futures_keys: {"nba": "basketball_nba_championship_winner", ...}
+        返回: {"nba": {team: prob}, ...}
+        """
+        result: dict[str, dict[str, float]] = {}
+        for sport, key in futures_keys.items():
+            result[sport] = self.get_futures(key)
+            time.sleep(0.3)
+        return result

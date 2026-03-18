@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
 
-from config import CITY_COORDS, SPORT_KEYWORDS, WEATHER_KEYWORDS
+from config import CITY_COORDS, SPORT_KEYWORDS, TEAM_ALIASES, WEATHER_KEYWORDS
 from polymarket_client import MarketInfo
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,15 @@ class SportsMarket:
     home_team:  str
     away_team:  str
     winner_side: str         # "home" | "away" | "draw"（YES 代表哪队赢）
+
+
+@dataclass
+class FuturesMarket:
+    market:        MarketInfo
+    sport:         str    # "nba" | "nfl" | "ucl" | "world_cup" | ...
+    team:          str    # 标准化球队/国家名（对应 OddsAPI）
+    market_type:   str    # "winner" | "qualify"
+    event:         str    # "2026 NBA Finals" | "2026 FIFA World Cup"
 
 
 # ── 日期解析 ──────────────────────────────────────────────────
@@ -205,19 +214,87 @@ def _parse_sports_market(market: MarketInfo) -> Optional[SportsMarket]:
     return None
 
 
+# ── 冠军/晋级 Futures 市场解析 ──────────────────────────────
+
+# "Will the Lakers win the 2026 NBA Finals?"
+# "Will Italy qualify for the 2026 FIFA World Cup?"
+_WINNER_PAT   = re.compile(r"will (?:the )?(.+?) win (?:the )?(.+?)[\?\.]*$", re.I)
+_QUALIFY_PAT  = re.compile(r"will (?:the )?(.+?) qualify (?:for|to) (?:the )?(.+?)[\?\.]*$", re.I)
+
+# 事件关键词 → sport 类别
+_EVENT_SPORT: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"nba finals|nba championship", re.I),        "nba"),
+    (re.compile(r"super bowl",                  re.I),        "nfl"),
+    (re.compile(r"champions league|ucl",        re.I),        "ucl"),
+    (re.compile(r"world cup|fifa",              re.I),        "world_cup"),
+    (re.compile(r"premier league|epl",          re.I),        "epl"),
+    (re.compile(r"la liga",                     re.I),        "la_liga"),
+    (re.compile(r"bundesliga",                  re.I),        "bundesliga"),
+]
+
+
+def _resolve_team(raw: str) -> Optional[str]:
+    """将市场中提到的球队/国家映射到标准名称"""
+    key = raw.strip().lower()
+    # 直接命中
+    if key in TEAM_ALIASES:
+        return TEAM_ALIASES[key]
+    # 部分匹配（alias 是 raw 的子串，或反之）
+    for alias, official in TEAM_ALIASES.items():
+        if alias in key or key in alias:
+            return official
+    # 兜底：首字母大写
+    return raw.strip().title()
+
+
+def _detect_event_sport(event_text: str) -> Optional[str]:
+    for pat, sport in _EVENT_SPORT:
+        if pat.search(event_text):
+            return sport
+    return None
+
+
+def _parse_futures_market(market: MarketInfo) -> Optional[FuturesMarket]:
+    text = market.question.strip()
+
+    for pattern, market_type in [(_WINNER_PAT, "winner"), (_QUALIFY_PAT, "qualify")]:
+        m = pattern.match(text)
+        if not m:
+            continue
+
+        raw_team  = m.group(1).strip()
+        raw_event = m.group(2).strip()
+
+        sport = _detect_event_sport(raw_event) or _detect_sport(text)
+        if not sport:
+            return None
+
+        team = _resolve_team(raw_team)
+        return FuturesMarket(
+            market       = market,
+            sport        = sport,
+            team         = team,
+            market_type  = market_type,
+            event        = raw_event,
+        )
+
+    return None
+
+
 # ── 主入口 ────────────────────────────────────────────────────
 
 @dataclass
 class ScanResult:
     weather_markets: list[WeatherMarket] = field(default_factory=list)
     sports_markets:  list[SportsMarket]  = field(default_factory=list)
+    futures_markets: list[FuturesMarket] = field(default_factory=list)
     skipped:         int = 0
 
 
 def classify_markets(markets: list[MarketInfo]) -> ScanResult:
     """
-    将原始 MarketInfo 列表分类为 WeatherMarket / SportsMarket。
-    无法识别的市场被跳过。
+    将原始 MarketInfo 列表分类为 WeatherMarket / SportsMarket / FuturesMarket。
+    解析优先级：天气 → 冠军 futures → 单场对决
     """
     result = ScanResult()
 
@@ -225,6 +302,11 @@ def classify_markets(markets: list[MarketInfo]) -> ScanResult:
         wm = _parse_weather_market(m)
         if wm:
             result.weather_markets.append(wm)
+            continue
+
+        fm = _parse_futures_market(m)
+        if fm:
+            result.futures_markets.append(fm)
             continue
 
         sm = _parse_sports_market(m)
@@ -237,6 +319,7 @@ def classify_markets(markets: list[MarketInfo]) -> ScanResult:
 
     logger.info(
         f"分类完成 — 天气: {len(result.weather_markets)}  "
-        f"体育: {len(result.sports_markets)}  跳过: {result.skipped}"
+        f"冠军futures: {len(result.futures_markets)}  "
+        f"单场: {len(result.sports_markets)}  跳过: {result.skipped}"
     )
     return result

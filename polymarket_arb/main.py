@@ -13,20 +13,23 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from config import BotConfig, ODDS_API_SPORT_KEYS, WEATHER_KEYWORDS, SPORT_KEYWORDS
+from config import BotConfig, FUTURES_SPORT_KEYS, ODDS_API_SPORT_KEYS, WEATHER_KEYWORDS, SPORT_KEYWORDS
 from market_scanner import classify_markets
 from odds_client import OddsClient
 from polymarket_client import PolymarketClient
-from signal_engine import generate_sports_signals, generate_weather_signals
+from signal_engine import generate_futures_signals, generate_sports_signals, generate_weather_signals
 from trader import Trader
 
 # ── 日志配置 ──────────────────────────────────────────────────
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.stream.reconfigure(encoding="utf-8", errors="replace")  # Windows cp1252 fix
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        _stream_handler,
         logging.FileHandler("polymarket_arb.log", encoding="utf-8"),
     ],
 )
@@ -45,10 +48,12 @@ def _handle_signal(signum, frame):
 # ── 单次扫描 ──────────────────────────────────────────────────
 
 def run_once(
-    poly:    PolymarketClient,
-    odds:    OddsClient,
-    trader:  Trader,
-    config:  BotConfig,
+    poly:         PolymarketClient,
+    odds:         OddsClient,
+    trader:       Trader,
+    config:       BotConfig,
+    sports_only:  bool = False,
+    weather_only: bool = False,
 ) -> dict:
     """
     完整执行一次扫描-信号-下单流程。
@@ -59,42 +64,56 @@ def run_once(
     logger.info(f"开始扫描  [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}]")
 
     # ── 1. 扫描 Polymarket 活跃市场 ────────────────────────────
-    all_keywords = list(WEATHER_KEYWORDS) + [
-        kw for kws in SPORT_KEYWORDS.values() for kw in kws
-    ]
+    if sports_only:
+        all_keywords = [kw for kws in SPORT_KEYWORDS.values() for kw in kws]
+    elif weather_only:
+        all_keywords = list(WEATHER_KEYWORDS)
+    else:
+        all_keywords = list(WEATHER_KEYWORDS) + [
+            kw for kws in SPORT_KEYWORDS.values() for kw in kws
+        ]
     raw_markets = poly.get_markets(keywords=all_keywords, limit=300)
 
-    # ── 2. 填充订单簿（批量，每次限速 0.1s）───────────────────
-    for m in raw_markets:
-        poly.enrich_with_orderbook(m)
-        time.sleep(0.05)
+    # ── 2. 并发填充订单簿（10 线程，~10x 提速）───────────────
+    poly.enrich_batch(raw_markets, workers=10)
 
     # ── 3. 分类市场 ────────────────────────────────────────────
     scan = classify_markets(raw_markets)
 
-    # ── 4. 获取体育赔率 ────────────────────────────────────────
-    sport_keys = list(ODDS_API_SPORT_KEYS.values())
-    odds_games = odds.get_all_sports_odds(sport_keys) if config.odds_api_key else []
+    # ── 4. 获取体育赔率（单场 + 冠军 futures）─────────────────
+    if not weather_only and config.odds_api_key:
+        sport_keys   = list(ODDS_API_SPORT_KEYS.values())
+        odds_games   = odds.get_all_sports_odds(sport_keys)
+        all_futures  = odds.get_all_futures(FUTURES_SPORT_KEYS)
+    else:
+        odds_games   = []
+        all_futures  = {}
 
     # ── 5. 生成信号 ────────────────────────────────────────────
-    weather_sigs = generate_weather_signals(
+    weather_sigs = [] if sports_only else generate_weather_signals(
         scan.weather_markets,
         min_edge       = config.min_edge,
         max_order_size = config.max_order_size,
     )
-    sports_sigs = generate_sports_signals(
+    sports_sigs = [] if weather_only else generate_sports_signals(
         scan.sports_markets,
         odds_games     = odds_games,
         min_edge       = config.min_edge,
         max_order_size = config.max_order_size,
     )
+    futures_sigs = [] if weather_only else generate_futures_signals(
+        scan.futures_markets,
+        all_futures_odds = all_futures,
+        min_edge         = config.min_edge,
+        max_order_size   = config.max_order_size,
+    )
 
-    all_signals = weather_sigs + sports_sigs
+    all_signals = weather_sigs + sports_sigs + futures_sigs
     triggered   = [s for s in all_signals if s.action != "PASS"]
 
     # ── 6. 打印信号汇总 ────────────────────────────────────────
-    logger.info(f"信号统计: 天气={len(weather_sigs)} 体育={len(sports_sigs)} "
-                f"触发={len(triggered)}")
+    logger.info(f"信号统计: 天气={len(weather_sigs)} 单场={len(sports_sigs)} "
+                f"冠军={len(futures_sigs)} 触发={len(triggered)}")
 
     if triggered:
         logger.info("─── 触发信号 ───────────────────────────────────")
@@ -117,6 +136,7 @@ def run_once(
         "markets_scanned":    len(raw_markets),
         "weather_markets":    len(scan.weather_markets),
         "sports_markets":     len(scan.sports_markets),
+        "futures_markets":    len(scan.futures_markets),
         "signals_triggered":  len(triggered),
         "orders_placed":      len(new_orders),
         "elapsed_s":          elapsed,
@@ -127,8 +147,10 @@ def run_once(
 
 def main():
     parser = argparse.ArgumentParser(description="Polymarket Weather + Sports Arb Bot")
-    parser.add_argument("--dry-run", action="store_true", help="强制 dry run 模式")
-    parser.add_argument("--once",    action="store_true", help="只跑一次后退出")
+    parser.add_argument("--dry-run",      action="store_true", help="强制 dry run 模式")
+    parser.add_argument("--once",         action="store_true", help="只跑一次后退出")
+    parser.add_argument("--sports-only",  action="store_true", help="只扫描体育市场")
+    parser.add_argument("--weather-only", action="store_true", help="只扫描天气市场")
     args = parser.parse_args()
 
     # 加载配置
@@ -168,7 +190,9 @@ def main():
     try:
         while not _shutdown:
             try:
-                run_once(poly, odds, trader, config)
+                run_once(poly, odds, trader, config,
+                         sports_only=args.sports_only,
+                         weather_only=args.weather_only)
             except KeyboardInterrupt:
                 break
             except Exception as e:
