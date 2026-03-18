@@ -1,4 +1,4 @@
-Run `python check_pnl.py` from the project directory and report the market making PnL results clearly.
+Run `python check_pnl.py` from the `hyperliquid_mm/` directory (i.e. `cd hyperliquid_mm && python check_pnl.py`) and report the market making PnL results clearly.
 
 After running the script, present the output in a clean summary covering:
 - 权益变化（当前权益 vs 启动时基准权益）
