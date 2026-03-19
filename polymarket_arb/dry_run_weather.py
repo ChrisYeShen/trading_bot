@@ -51,8 +51,8 @@ def _market(cid, question, yes_bid, yes_ask):
     )
 
 # 今天 +3 天作为预报目标日期（NOAA 常见预报时效）
-_TARGET = date(2026, 3, 22)
-_DATE_STR = "March 22"
+_TARGET = date(2026, 3, 20)
+_DATE_STR = "March 20"
 
 RAW_MARKETS = [
     # ── 降水市场 ────────────────────────────────────────────
