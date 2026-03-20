@@ -42,6 +42,9 @@ class MarketInfo:
     yes_best_bid:   Optional[float] = None   # 卖 YES 可得到
     no_best_ask:    Optional[float] = None
     no_best_bid:    Optional[float] = None
+    # 流动性与 negRisk 分组（从 Gamma API 填充）
+    liquidity_usdc:      Optional[float] = None  # 订单簿总深度 (USDC)
+    neg_risk_group_id:   Optional[str]   = None  # negRisk 同组市场共享此 ID
 
     @property
     def yes_mid(self) -> Optional[float]:

@@ -11,6 +11,7 @@ signal_engine.py — 计算套利信号 (edge)
   逻辑相同
 """
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
@@ -49,6 +50,31 @@ class Signal:
 
 # ── 天气信号生成 ───────────────────────────────────────────────
 
+def _normal_cdf(x: float) -> float:
+    """标准正态分布 CDF 近似（无需 scipy）"""
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def _temp_prob(forecast: float, threshold_lo: float,
+               threshold_hi: Optional[float], direction: str,
+               sigma: float = 3.0) -> float:
+    """
+    将 NOAA 点预报转化为目标区间的概率，用正态分布建模预报不确定性。
+    sigma=3°F 对应 1-2天预报误差的典型标准差。
+    """
+    if direction == "range" and threshold_hi is not None:
+        # P(lo ≤ T ≤ hi)
+        p_hi = _normal_cdf((threshold_hi - forecast) / sigma)
+        p_lo = _normal_cdf((threshold_lo - forecast) / sigma)
+        return max(0.0, min(1.0, p_hi - p_lo))
+    elif direction == "above":
+        # P(T ≥ threshold_lo)
+        return max(0.0, min(1.0, 1.0 - _normal_cdf((threshold_lo - forecast) / sigma)))
+    else:  # "below"
+        # P(T ≤ threshold_lo)
+        return max(0.0, min(1.0, _normal_cdf((threshold_lo - forecast) / sigma)))
+
+
 def _weather_reference_prob(wm: WeatherMarket) -> Optional[float]:
     """从 NOAA 获取参考概率（0.0 ~ 1.0）"""
     try:
@@ -58,23 +84,16 @@ def _weather_reference_prob(wm: WeatherMarket) -> Optional[float]:
         elif wm.metric == "snow":
             return noaa_client.get_snow_probability(wm.lat, wm.lon, wm.target_date)
 
-        elif wm.metric in ("temperature_high", "temperature_low"):
+        elif wm.metric in ("temperature_high", "temperature_low",
+                           "temperature_range"):
             temps = noaa_client.get_temperature_forecast(wm.lat, wm.lon, wm.target_date)
-            key = "high" if wm.metric == "temperature_high" else "low"
+            # bracket 市场用 high（日最高温）；low 型用 low
+            key = "low" if wm.metric == "temperature_low" else "high"
             forecast_temp = temps.get(key)
             if forecast_temp is None or wm.threshold is None:
                 return None
-
-            # 将点估计转换为概率（±5°F 的不确定性带，用线性插值）
-            uncertainty = 5.0
-            diff = forecast_temp - wm.threshold
-            if wm.direction == "above":
-                # P(temp > threshold)
-                raw_prob = min(1.0, max(0.0, (diff + uncertainty) / (2 * uncertainty)))
-            else:
-                # P(temp < threshold)
-                raw_prob = min(1.0, max(0.0, (-diff + uncertainty) / (2 * uncertainty)))
-            return raw_prob
+            return _temp_prob(forecast_temp, wm.threshold,
+                              wm.threshold_high, wm.direction or "above")
 
     except Exception as e:
         logger.warning(f"NOAA 查询失败 [{wm.city}/{wm.metric}]: {e}")
@@ -104,9 +123,7 @@ def generate_weather_signals(
             continue
 
         edge = ref_prob - market_prob
-        action, token_id, limit_price = _decide_action(
-            edge, market, min_edge
-        )
+        action, token_id, limit_price = _decide_action(edge, market, min_edge)
 
         detail = (
             f"NOAA={ref_prob:.1%}  market={market_prob:.1%}  "
@@ -130,7 +147,45 @@ def generate_weather_signals(
         if action != "PASS":
             logger.info(f"[天气] {action}  {detail}")
 
+    # ── negRisk 去重：同一 negRisk 组只保留 edge 最大的 BUY_YES 信号 ──
+    # 原理：negRisk 市场恰好一个档位结算为 YES，不能同时买多个档位的 YES
+    signals = _dedup_neg_risk(signals)
+
     return signals
+
+
+def _dedup_neg_risk(signals: list[Signal]) -> list[Signal]:
+    """
+    对同一 negRisk 组（neg_risk_group_id 相同）的 BUY_YES 信号去重，
+    只保留 edge 最大的那个；BUY_NO 和 PASS 信号不受影响。
+    """
+    # 分离出有 negRisk 组 ID 的 BUY_YES 信号
+    group_best: dict[str, Signal] = {}   # group_id → best Signal
+    result: list[Signal] = []
+
+    for sig in signals:
+        gid = sig.market.neg_risk_group_id
+        if gid and sig.action == "BUY_YES":
+            prev = group_best.get(gid)
+            if prev is None or sig.edge > prev.edge:
+                group_best[gid] = sig
+        else:
+            result.append(sig)
+
+    for gid, best_sig in group_best.items():
+        result.append(best_sig)
+        filtered = [s for s in signals
+                    if s.market.neg_risk_group_id == gid
+                    and s.action == "BUY_YES"
+                    and s is not best_sig]
+        if filtered:
+            logger.info(
+                f"[negRisk去重] 组 {gid[:12]}… 保留 edge={best_sig.edge:+.1%} "
+                f"{best_sig.market.question[:50]}，"
+                f"过滤掉 {len(filtered)} 个冲突 BUY_YES"
+            )
+
+    return result
 
 
 # ── 体育信号生成 ───────────────────────────────────────────────
@@ -242,18 +297,26 @@ def _fuzzy_team_lookup(team: str, futures_probs: dict[str, float]) -> Optional[f
     return None
 
 
-_MAX_SPREAD = 0.15   # 超过 15% bid-ask spread 视为无流动性，跳过
+_MAX_SPREAD       = 0.15    # bid-ask spread 上限
+_MIN_LIQUIDITY    = 200.0   # 订单簿最小深度 (USDC)；negRisk bracket 市场尤其重要
 
 
-def _is_liquid(market: MarketInfo) -> bool:
-    """双边都有挂单且 spread 合理才认为有流动性"""
+def _is_liquid(market: MarketInfo, min_liquidity: float = _MIN_LIQUIDITY) -> bool:
+    """
+    双边都有挂单 + spread ≤ 15% + 流动性深度 ≥ min_liquidity USDC。
+    liquidity_usdc=None 时跳过深度检查（兼容旧数据路径）。
+    """
     bid = market.yes_best_bid
     ask = market.yes_best_ask
     if bid is None or ask is None:
         return False
     if ask <= bid:
         return False
-    return (ask - bid) <= _MAX_SPREAD
+    if (ask - bid) > _MAX_SPREAD:
+        return False
+    if market.liquidity_usdc is not None and market.liquidity_usdc < min_liquidity:
+        return False
+    return True
 
 
 def generate_futures_signals(

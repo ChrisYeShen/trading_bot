@@ -24,14 +24,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WeatherMarket:
-    market:     MarketInfo
-    city:       str
-    lat:        float
-    lon:        float
+    market:      MarketInfo
+    city:        str
+    lat:         float
+    lon:         float
     target_date: date
-    metric:     str          # "precipitation" | "temperature_high" | "temperature_low" | "snow"
-    threshold:  Optional[float] = None   # 温度市场：阈值（°F）
-    direction:  Optional[str]  = None   # "above" | "below"（温度市场）
+    metric:      str           # "precipitation" | "temperature_range" | "temperature_high"
+                               # | "temperature_low" | "snow"
+    threshold:   Optional[float] = None  # 单阈值（above/below 型）或区间下界（range 型）
+    threshold_high: Optional[float] = None  # 区间上界（range 型专用）
+    direction:   Optional[str]  = None   # "above" | "below" | "range"
 
 
 @dataclass
@@ -139,7 +141,39 @@ def _parse_weather_market(market: MarketInfo) -> Optional[WeatherMarket]:
     if any(kw in text for kw in ["rain", "precipitation", "precip"]):
         return WeatherMarket(market, city, lat, lon, target_date, "precipitation")
 
-    # 温度类：提取阈值
+    # ── 温度区间（bracket）格式 ─────────────────────────────
+    # 例："Will the highest temperature in Seattle be between 52-53°F on March 19?"
+    range_m = re.search(
+        r"temperature.*?between\s+(-?\d+(?:\.\d+)?)[–\-](-?\d+(?:\.\d+)?)\s*°?f",
+        text,
+    )
+    if range_m:
+        lo = float(range_m.group(1))
+        hi = float(range_m.group(2))
+        return WeatherMarket(market, city, lat, lon, target_date,
+                             "temperature_range", lo, hi, "range")
+
+    # ── 开放上界："X°F or higher / or above" ─────────────────
+    # 例："Will the highest temperature in Seattle be 62°F or higher on March 19?"
+    above_m = re.search(
+        r"temperature.*?(-?\d+(?:\.\d+)?)\s*°?f\s+or\s+(?:higher|above)",
+        text,
+    )
+    if above_m:
+        return WeatherMarket(market, city, lat, lon, target_date,
+                             "temperature_high", float(above_m.group(1)), None, "above")
+
+    # ── 开放下界："X°F or lower / or below" ──────────────────
+    # 例："Will the highest temperature in Seattle be 43°F or below on March 19?"
+    below_m = re.search(
+        r"temperature.*?(-?\d+(?:\.\d+)?)\s*°?f\s+or\s+(?:lower|below)",
+        text,
+    )
+    if below_m:
+        return WeatherMarket(market, city, lat, lon, target_date,
+                             "temperature_low", float(below_m.group(1)), None, "below")
+
+    # ── 传统 exceed/above/below 格式 ─────────────────────────
     # 例："Will the high temperature in NYC exceed 75°F on March 20?"
     temp_m = re.search(
         r"(high|low|temperature)\s+.*?"
@@ -150,7 +184,8 @@ def _parse_weather_market(market: MarketInfo) -> Optional[WeatherMarket]:
         metric    = "temperature_high" if "high" in temp_m.group(1) else "temperature_low"
         direction = "above" if temp_m.group(2) in ("exceed","above","over","at least") else "below"
         threshold = float(temp_m.group(3))
-        return WeatherMarket(market, city, lat, lon, target_date, metric, threshold, direction)
+        return WeatherMarket(market, city, lat, lon, target_date,
+                             metric, threshold, None, direction)
 
     # 没有明确指标
     return None
